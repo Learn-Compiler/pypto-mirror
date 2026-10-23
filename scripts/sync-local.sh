@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# 把 gitcode.com/cann/pypto.git 镜像到 GitHub（本机兜底方案，走 SSH，不需要 PAT）
+# 把 gitcode.com/cann/pypto.git 镜像到 GitHub 的 pypto-mirror 仓库（本机兜底方案）
+# 走 SSH，不需要 PAT；只推 master/9.x/tag 等镜像 ref，绝不动 main（main 装着 workflow）。
 #
 # 用法: ./sync-local.sh
 # 环境变量:
 #   PYPTO_UPSTREAM     上游地址，默认 https://gitcode.com/cann/pypto.git
-#   PYPTO_MIRROR_REPO  目标地址，默认 git@github.com:Learn-Compiler/pypto.git
+#   PYPTO_MIRROR_REPO  目标地址，默认 git@github.com:Learn-Compiler/pypto-mirror.git
 #   PYPTO_MIRROR_WORK  持久缓存目录，默认 ~/.cache/pypto-mirror
 
 set -euo pipefail
 
 UPSTREAM="${PYPTO_UPSTREAM:-https://gitcode.com/cann/pypto.git}"
-MIRROR="${PYPTO_MIRROR_REPO:-git@github.com:Learn-Compiler/pypto.git}"
+MIRROR="${PYPTO_MIRROR_REPO:-git@github.com:Learn-Compiler/pypto-mirror.git}"
 WORK="${PYPTO_MIRROR_WORK:-$HOME/.cache/pypto-mirror}"
 BARE="$WORK/upstream.git"
+PROTECTED="${PYPTO_PROTECTED_BRANCH:-main}"
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
 
@@ -35,8 +37,8 @@ if [ ! -d "$BARE" ]; then
 fi
 
 # 只跟踪 refs/heads/* 和 refs/tags/*。
-# 绝不能用 clone --mirror：GitCode 会广播 8000+ 个 refs/tmp/* 临时 ref，
-# 全抓下来会让仓库从 58MB 膨胀到 422MB，且 push --mirror 到 GitHub 会被拒绝。
+# 绝不能用 clone --mirror：GitCode 会广播 8168 个 refs/tmp/* 临时 ref，
+# 全抓下来会让 58MB 膨胀到 422MB，且推回 GitHub 会被拒。
 git -C "$BARE" remote get-url origin >/dev/null 2>&1 || git -C "$BARE" remote add origin "$UPSTREAM"
 git -C "$BARE" remote set-url origin "$UPSTREAM"
 git -C "$BARE" config --unset-all remote.origin.fetch 2>/dev/null || true
@@ -50,11 +52,34 @@ if [ -n "$stray" ]; then
   printf '%s\n' "$stray" | sed 's/^/delete /' | git -C "$BARE" update-ref --stdin
 fi
 
-log "增量抓取上游 ref（--prune 会同步上游已删除的分支和 tag）…"
+log "增量抓取上游 ref（--prune 同步上游已删除的分支和 tag）…"
 git -C "$BARE" fetch --prune --no-tags origin
 
-log "推送到 $MIRROR …"
-git -C "$BARE" push --mirror "$MIRROR"
+# 上游若出现 main，会和本仓库的 workflow 分支冲突，必须人工处理
+if git -C "$BARE" show-ref --verify --quiet "refs/heads/$PROTECTED"; then
+  log "错误：上游出现了 $PROTECTED 分支，会覆盖镜像仓库的 workflow。中止。"
+  exit 1
+fi
+
+log "推送镜像 ref 到 $MIRROR（不碰 $PROTECTED）…"
+git -C "$BARE" push --force "$MIRROR" \
+  'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+
+# 清理上游已删除的 ref，跳过受保护分支
+remote_refs=$(git -C "$BARE" ls-remote --refs --heads --tags "$MIRROR" | awk '{print $2}')
+local_refs=$(git -C "$BARE" for-each-ref --format='%(refname)')
+removed=0
+while IFS= read -r ref; do
+  [ -z "$ref" ] && continue
+  [ "$ref" = "refs/heads/$PROTECTED" ] && continue
+  if ! printf '%s\n' "$local_refs" | grep -qxF "$ref"; then
+    if git -C "$BARE" push --quiet "$MIRROR" ":${ref}"; then
+      log "  删除上游已不存在的 ref: $ref"
+      removed=$((removed + 1))
+    fi
+  fi
+done <<< "$remote_refs"
+log "共清理 $removed 个残留 ref"
 
 log "完成。"
 git -C "$BARE" for-each-ref --format='%(refname)' | sed 's#refs/##' | awk -F/ '{print "  " $1}' | sort | uniq -c
