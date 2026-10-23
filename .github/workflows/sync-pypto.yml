@@ -1,6 +1,6 @@
 name: Sync pypto from GitCode
 
-# 定时把 https://gitcode.com/cann/pypto.git 完整镜像到 kaishaoshao/pypto
+# 定时把 https://gitcode.com/cann/pypto.git 完整镜像到目标仓库。
 # 只镜像 refs/heads/* 和 refs/tags/*，忽略 GitCode 广播的 refs/tmp/* 临时 ref。
 # 文档见同仓库 README.md
 
@@ -24,7 +24,7 @@ permissions:
 
 env:
   UPSTREAM_URL: https://gitcode.com/cann/pypto.git
-  MIRROR_REPO: kaishaoshao/pypto
+  MIRROR_REPO: Learn-Compiler/pypto
 
 jobs:
   sync:
@@ -58,7 +58,7 @@ jobs:
           echo "上游 ref 数: ${up_count}，镜像 ref 数: ${mk_count}"
 
           if [ "${{ inputs.force }}" != "true" ] && [ "$upstream_refs" = "$mirror_refs" ]; then
-            echo "✅ ref 完全一致，无需同步，跳过 400+MB 克隆。"
+            echo "✅ ref 完全一致，无需同步，跳过 58MB 克隆。"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "⚠️ 检测到差异，开始全量同步。"
@@ -69,8 +69,8 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          # 不用 clone --mirror：那会把 8000+ 个 refs/tmp/* 一起抓下来，
-          # 后面 push --mirror 到 GitHub 会被拒绝（GitHub 只接受 heads/tags）。
+          # 不用 clone --mirror：那会把 8000+ 个 refs/tmp/* 一起抓下来（多 364MB），
+          # 而且推回 GitHub 时 GitHub 只接受 heads/tags，会整个 push 被拒。
           git init --bare -q upstream.git
           cd upstream.git
           git remote add origin "$UPSTREAM_URL"
@@ -91,35 +91,54 @@ jobs:
             exit 1
           fi
 
-      - name: 推送到 GitHub（所有分支与 tag，并清理上游已删的 ref）
+      - name: 推送到 GitHub（先推 ref → 再切默认分支 → 最后清理残留）
         if: steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.MIRROR_PAT }}
         run: |
           set -euo pipefail
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          cd upstream.git
-          # 本地只有 heads/tags，--mirror 等于「推全量 + 删掉镜像端多余的 ref」
-          git -c "http.extraheader=AUTHORIZATION: basic $auth" \
-            push --mirror "https://github.com/${MIRROR_REPO}.git"
+          gitc() { git -c "http.extraheader=AUTHORIZATION: basic $auth" "$@"; }
 
-      - name: 确保 GitHub 默认分支是 master
-        env:
-          GH_TOKEN: ${{ secrets.MIRROR_PAT }}
-        run: |
-          # 空仓库首次 push 后 GitHub 可能仍把默认分支记为 main，这步纠正它。
-          # 失败只告警：PAT 没有 Administration 权限，或手动去 Settings→Branches 改一次。
+          cd upstream.git
+          git remote remove mirror 2>/dev/null || true
+          git remote add mirror "https://github.com/${MIRROR_REPO}.git"
+
+          # 1) 先推所有分支和 tag。这里不能用 --prune / --mirror：
+          #    如果目标仓库是带着 README 建的，默认分支是 main，
+          #    GitHub 会拒绝删除当前默认分支，整个 push 直接失败。
+          gitc push --quiet --force mirror \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+          echo "✅ 分支和 tag 已推送"
+
+          # 2) 这时 master 一定存在，把默认分支切过去
           code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PATCH \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${MIRROR_REPO}" \
             -d '{"default_branch":"master"}')
-          if [ "$code" != "200" ]; then
-            echo "::warning::设置默认分支失败 HTTP ${code}（见 README 的 PAT 权限说明）"
-            cat /tmp/resp.json || true
+          if [ "$code" = "200" ]; then
+            echo "✅ 默认分支 = master"
           else
-            echo "✅ 默认分支已设为 master"
+            echo "::warning::设置默认分支失败 HTTP ${code}（PAT 缺 Administration 写权限？）"
+            cat /tmp/resp.json || true
           fi
+
+          # 3) 默认分支已经切走，这时才能删掉上游不存在的 ref（如建仓时留下的 main）
+          gitc ls-remote --refs --heads --tags mirror | awk '{print $2}' > /tmp/remote_refs.txt
+          git for-each-ref --format='%(refname)' > /tmp/local_refs.txt
+          removed=0
+          while read -r ref; do
+            [ -z "$ref" ] && continue
+            [ "$ref" = "refs/heads/master" ] && continue
+            if ! grep -qxF "$ref" /tmp/local_refs.txt; then
+              if gitc push --quiet mirror ":${ref}"; then
+                echo "🗑  删除上游已不存在的 ref: ${ref}"
+                removed=$((removed + 1))
+              fi
+            fi
+          done < /tmp/remote_refs.txt
+          echo "共清理 ${removed} 个残留 ref"
 
       - name: 同步摘要
         if: always()

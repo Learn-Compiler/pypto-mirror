@@ -4,13 +4,13 @@
 # 用法: ./sync-local.sh
 # 环境变量:
 #   PYPTO_UPSTREAM     上游地址，默认 https://gitcode.com/cann/pypto.git
-#   PYPTO_MIRROR_REPO  目标地址，默认 git@github.com:kaishaoshao/pypto.git
+#   PYPTO_MIRROR_REPO  目标地址，默认 git@github.com:Learn-Compiler/pypto.git
 #   PYPTO_MIRROR_WORK  持久缓存目录，默认 ~/.cache/pypto-mirror
 
 set -euo pipefail
 
 UPSTREAM="${PYPTO_UPSTREAM:-https://gitcode.com/cann/pypto.git}"
-MIRROR="${PYPTO_MIRROR_REPO:-git@github.com:kaishaoshao/pypto.git}"
+MIRROR="${PYPTO_MIRROR_REPO:-git@github.com:Learn-Compiler/pypto.git}"
 WORK="${PYPTO_MIRROR_WORK:-$HOME/.cache/pypto-mirror}"
 BARE="$WORK/upstream.git"
 
