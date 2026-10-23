@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror gitcode.com/cann/pypto.git to GitHub
+Documentation=https://gitcode.com/cann/pypto
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/pypto-mirror-sync
+TimeoutStartSec=30min
+# 失败不重试轰炸，等下一个周期
+Restart=no

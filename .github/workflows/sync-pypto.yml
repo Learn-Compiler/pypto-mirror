@@ -1,0 +1,136 @@
+name: Sync pypto from GitCode
+
+# 定时把 https://gitcode.com/cann/pypto.git 完整镜像到 kaishaoshao/pypto
+# 只镜像 refs/heads/* 和 refs/tags/*，忽略 GitCode 广播的 refs/tmp/* 临时 ref。
+# 文档见同仓库 README.md
+
+on:
+  schedule:
+    # GitHub 用 UTC。每 2 小时的第 17 分钟跑一次，避开整点高峰。
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "忽略 ref 差异检查，强制重新全量同步"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-pypto
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://gitcode.com/cann/pypto.git
+  MIRROR_REPO: kaishaoshao/pypto
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 配置 git（大仓库 + 慢链路容错）
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 100
+          git config --global http.lowSpeedTime 300
+          git config --global http.version HTTP/1.1
+
+      - name: 比对上游与镜像的 ref，判断是否需要同步
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_PAT }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+
+          # --heads --tags 只取分支和标签，天然排除 GitCode 的 refs/tmp/*；
+          # --refs 去掉 annotated tag 重复的 ^{} 行
+          upstream_refs=$(git ls-remote --refs --heads --tags "$UPSTREAM_URL" | sort)
+          mirror_refs=$(git -c "http.extraheader=AUTHORIZATION: basic $auth" \
+            ls-remote --refs --heads --tags "https://github.com/${MIRROR_REPO}.git" 2>/dev/null | sort || true)
+
+          up_count=$(printf '%s\n' "$upstream_refs" | grep -c . || true)
+          mk_count=$(printf '%s\n' "$mirror_refs"   | grep -c . || true)
+          echo "上游 ref 数: ${up_count}，镜像 ref 数: ${mk_count}"
+
+          if [ "${{ inputs.force }}" != "true" ] && [ "$upstream_refs" = "$mirror_refs" ]; then
+            echo "✅ ref 完全一致，无需同步，跳过 400+MB 克隆。"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️ 检测到差异，开始全量同步。"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 从 GitCode 抓取（只取分支和 tag）
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # 不用 clone --mirror：那会把 8000+ 个 refs/tmp/* 一起抓下来，
+          # 后面 push --mirror 到 GitHub 会被拒绝（GitHub 只接受 heads/tags）。
+          git init --bare -q upstream.git
+          cd upstream.git
+          git remote add origin "$UPSTREAM_URL"
+          git config remote.origin.fetch '+refs/heads/*:refs/heads/*'
+          git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
+          git fetch --prune --no-tags origin
+
+          echo "--- 体积 ---"
+          du -sh .
+          echo "--- ref 统计 ---"
+          git for-each-ref --format='%(refname)' | sed 's#refs/##' | awk -F/ '{print $1}' | sort | uniq -c
+
+          # 防御：确认真没有混入非法 ref
+          stray=$(git for-each-ref --format='%(refname)' | grep -vc -E '^refs/(heads|tags)/' || true)
+          if [ "$stray" -ne 0 ]; then
+            echo "::error::发现 $stray 个非 heads/tags 的 ref，中止。"
+            git for-each-ref --format='%(refname)' | grep -v -E '^refs/(heads|tags)/' | head
+            exit 1
+          fi
+
+      - name: 推送到 GitHub（所有分支与 tag，并清理上游已删的 ref）
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_PAT }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          cd upstream.git
+          # 本地只有 heads/tags，--mirror 等于「推全量 + 删掉镜像端多余的 ref」
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" \
+            push --mirror "https://github.com/${MIRROR_REPO}.git"
+
+      - name: 确保 GitHub 默认分支是 master
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_PAT }}
+        run: |
+          # 空仓库首次 push 后 GitHub 可能仍把默认分支记为 main，这步纠正它。
+          # 失败只告警：PAT 没有 Administration 权限，或手动去 Settings→Branches 改一次。
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PATCH \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${MIRROR_REPO}" \
+            -d '{"default_branch":"master"}')
+          if [ "$code" != "200" ]; then
+            echo "::warning::设置默认分支失败 HTTP ${code}（见 README 的 PAT 权限说明）"
+            cat /tmp/resp.json || true
+          else
+            echo "✅ 默认分支已设为 master"
+          fi
+
+      - name: 同步摘要
+        if: always()
+        run: |
+          {
+            echo "### pypto 同步结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 上游 | \`https://gitcode.com/cann/pypto.git\` |"
+            echo "| 镜像 | \`https://github.com/${MIRROR_REPO}\` |"
+            echo "| 是否触发同步 | \`${{ steps.diff.outputs.changed }}\` |"
+            echo "| 时间 | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |"
+          } >> "$GITHUB_STEP_SUMMARY"
