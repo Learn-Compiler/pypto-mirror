@@ -30,6 +30,7 @@ fi
 git config --global http.postBuffer 524288000 2>/dev/null || true
 git config --global http.lowSpeedLimit 100 2>/dev/null || true
 git config --global http.lowSpeedTime 300 2>/dev/null || true
+git config --global http.version HTTP/1.1 2>/dev/null || true
 
 if [ ! -d "$BARE" ]; then
   log "首次运行，初始化本地裸仓库…"
@@ -53,7 +54,19 @@ if [ -n "$stray" ]; then
 fi
 
 log "增量抓取上游 ref（--prune 同步上游已删除的分支和 tag）…"
-git -C "$BARE" fetch --prune --no-tags origin
+fetch_ok=0
+for attempt in 1 2 3; do
+  if git -C "$BARE" fetch --prune --no-tags origin; then
+    fetch_ok=1
+    break
+  fi
+  log "第 $attempt 次抓取失败（多为链路抖动/TLS 断连），15 秒后重试…"
+  sleep 15
+done
+if [ "$fetch_ok" -ne 1 ]; then
+  log "连续 3 次抓取失败，放弃本次，等下一个周期。"
+  exit 1
+fi
 
 # 上游若出现 main，会和本仓库的 workflow 分支冲突，必须人工处理
 if git -C "$BARE" show-ref --verify --quiet "refs/heads/$PROTECTED"; then

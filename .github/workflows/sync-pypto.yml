@@ -86,7 +86,15 @@ jobs:
           git remote add origin "$UPSTREAM_URL"
           git config remote.origin.fetch '+refs/heads/*:refs/heads/*'
           git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
-          git fetch --prune --no-tags origin
+
+          # GitCode 偶发 TLS 断连（curl 56 GnuTLS recv error），重试 3 次
+          fetch_ok=0
+          for attempt in 1 2 3; do
+            if git fetch --prune --no-tags origin; then fetch_ok=1; break; fi
+            echo "::warning::第 $attempt 次抓取失败，15 秒后重试"
+            sleep 15
+          done
+          [ "$fetch_ok" -eq 1 ] || { echo "::error::连续 3 次抓取失败"; exit 1; }
 
           echo "--- 体积 ---"; du -sh .
           echo "--- ref 统计 ---"
