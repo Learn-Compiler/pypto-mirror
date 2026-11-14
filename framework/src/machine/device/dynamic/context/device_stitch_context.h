@@ -101,16 +101,12 @@ public:
         return stitchNameDict.count(kind) == 0 ? "invalid stitch kind" : stitchNameDict.find(kind)->second;
     }
 
+    // Caller must claim the edge via CheckStitchCacheDuplicate and pass producerStitchList
+    // (typically from GetOperationStitch after a claim miss); no claim inside.
     static void HandleOneStitch(DevAscendFunctionDupped& producerDup, DevAscendFunctionDupped& consumerDup,
-                                DevAscendFunctionDuppedStitchList& producerStitchList, uint32_t producerFuncIndex,
-                                size_t producerOperationIdx, size_t consumerIdx, size_t consumerOperationIdx,
-                                DeviceWorkspaceAllocator* workspace, StitchKind debugStitchKind, int debugSlotIdx,
-                                uint64_t devTaskId);
-
-    static void HandleOneStitch(DevAscendFunctionDupped& producerDup, DevAscendFunctionDupped& consumerDup,
-                                uint32_t producerFuncIndex, size_t producerOperationIdx, size_t consumerIdx,
-                                size_t consumerOperationIdx, DeviceWorkspaceAllocator* workspace,
-                                StitchKind debugStitchKind, int debugSlotIdx, uint64_t devTaskId);
+                                DevAscendFunctionDuppedStitchList& producerStitchList, size_t producerOperationIdx,
+                                size_t consumerIdx, size_t consumerOperationIdx, DeviceWorkspaceAllocator* workspace,
+                                StitchKind debugStitchKind, int debugSlotIdx);
 
     template <typename T>
     static inline std::string IntVecToStr(DevAscendFunctionDupped& dup, DevLocalVector<T>& vec)

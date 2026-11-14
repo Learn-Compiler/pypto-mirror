@@ -305,6 +305,23 @@ void UnbindStitchedList(DeviceStitchContext& ctx)
     ctx.stitchedList_.capacity_ = 0;
 }
 
+// FullCoverUpdateStitch always reads stitch-cache fields from workspace_ (hot-path hoist).
+struct MiniStitchWorkspace {
+    DevAscendProgram prog{};
+    std::vector<uint64_t> cache;
+    DeviceWorkspaceAllocator alloc;
+
+    explicit MiniStitchWorkspace(uint32_t stride = 8) : alloc(&prog)
+    {
+        prog.stitchCacheEpoch_ = 1;
+        cache.assign(static_cast<size_t>(stride) * static_cast<size_t>(stride), 0);
+        alloc.stitchCacheAddr_ = reinterpret_cast<uint64_t>(cache.data());
+        alloc.stitchCacheStride_ = stride;
+    }
+};
+
+void BindStitchWorkspace(DeviceStitchContext& ctx, MiniStitchWorkspace& ws) { ctx.workspace_ = &ws.alloc; }
+
 } // namespace
 
 // FullCoverUpdateStitch → FullCoverPartialProdToFullConsStitch early return (empty lists).
@@ -315,9 +332,11 @@ TEST(FullCoverUpdateStitchTest, EmptyLists_EarlyReturn)
     prev.Build(true);
     next.Build(false);
 
+    MiniStitchWorkspace ws;
     DevAscendFunctionDupped storage[1] = {prev.dup};
     DeviceStitchContext stitchCtx;
     BindStitchedList(stitchCtx, storage, 1);
+    BindStitchWorkspace(stitchCtx, ws);
 
     DeviceExecuteSlot slot{};
     slot.stitchDupIdx = 0;
@@ -353,9 +372,11 @@ TEST(FullCoverUpdateStitchTest, ReadProducerSkipped)
     incast.consumerList.AssignOffsetSize(0, 0);
     incast.stitchPolicyFullCoverConsumerAllOpIdxList.AssignOffsetSize(0, 0);
 
+    MiniStitchWorkspace ws;
     DevAscendFunctionDupped storage[1] = {prev.dup};
     DeviceStitchContext stitchCtx;
     BindStitchedList(stitchCtx, storage, 1);
+    BindStitchWorkspace(stitchCtx, ws);
 
     DeviceExecuteSlot slot{};
     slot.stitchDupIdx = 0;

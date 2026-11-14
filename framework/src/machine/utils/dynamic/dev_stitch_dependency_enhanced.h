@@ -19,6 +19,8 @@
  *   Slow: up to 2^N writers; store ranges; replace on overlap, else append (write-write only).
  *   Encode picks Fast when divides or min_read >= max_write on every dim; else Slow.
  * - Reads / atomic / write-meets-them: full dependency on the current group.
+ * - Callers claim the stitch-cache edge before HandleOneStitch so duplicates can skip
+ *   GetOperationStitch / PushBackTask without a second claim inside HandleOne.
  */
 
 #pragma once
@@ -60,6 +62,9 @@ inline void EstablishDependenciesWithType(uint64_t cellMemBase, uint64_t* cellMa
                                           size_t devCurrIdx, uint32_t operationIdx, DeviceWorkspaceAllocator* workspace,
                                           uint64_t* matchCount, int slotIdx, const DevCellMatchTableDesc& desc)
 {
+    uint64_t* stitchCache = workspace->StitchCacheAddr();
+    const uint32_t stitchCacheStride = workspace->StitchCacheStride();
+    const uint16_t stitchCacheEpoch = workspace->StitchCacheEpoch();
     for (uint32_t i = 0; i < opCount; i++) {
         uint64_t opId = CellMatchGetOpId(cellMatchTableData, cellMemBase, opType, i, desc);
         if (opId == AICORE_TASK_INIT) {
@@ -71,10 +76,16 @@ inline void EstablishDependenciesWithType(uint64_t cellMemBase, uint64_t* cellMa
             continue;
         }
 
+        // Claim before HandleOne so duplicates skip GetOperationStitch.
+        if (CheckStitchCacheDuplicate(stitchCache, stitchCacheStride, stitchCacheEpoch, funcIdx, opIdx,
+                                      static_cast<uint32_t>(devCurrIdx), operationIdx, stitchDevTaskId)) {
+            continue;
+        }
         (*matchCount)++;
-        DeviceStitchContext::HandleOneStitch(stitchingList[funcIdx], *currDup, funcIdx, opIdx, devCurrIdx, operationIdx,
-                                             workspace, DeviceStitchContext::StitchKind::StitchDefault, slotIdx,
-                                             stitchDevTaskId);
+        auto& producerStitchList = stitchingList[funcIdx].GetOperationStitch(opIdx, false);
+        DeviceStitchContext::HandleOneStitch(stitchingList[funcIdx], *currDup, producerStitchList, opIdx, devCurrIdx,
+                                             operationIdx, workspace, DeviceStitchContext::StitchKind::StitchDefault,
+                                             slotIdx);
 
         DEV_VERBOSE_DEBUG("Stitch dependency: (%u!%u) -> (%zu!%u), cellopType=%u, cellopCount=%u, "
                           "slotIdx=%d, opTagid=%x, curOpTagid=%lx",
@@ -147,6 +158,9 @@ inline void CellMatchStitchOverlappingNormalWrites(uint64_t cellMemBase, uint64_
     int dims = desc.GetDimensionSize();
     const uint64_t rangeWordStride = static_cast<uint64_t>(dims) * 2u;
     uint64_t* rangeBase = cellMatchTableData + cellMemBase + desc.normalWriteOpRangeBase;
+    uint64_t* stitchCache = workspace->StitchCacheAddr();
+    const uint32_t stitchCacheStride = workspace->StitchCacheStride();
+    const uint16_t stitchCacheEpoch = workspace->StitchCacheEpoch();
     for (uint32_t i = 0; i < writerCount; ++i) {
         uint64_t opId = CellMatchGetOpId(cellMatchTableData, cellMemBase, CELL_MATCH_OP_TYPE_NORMAL_WRITE, i, desc);
         if (opId == AICORE_TASK_INIT) {
@@ -163,10 +177,16 @@ inline void CellMatchStitchOverlappingNormalWrites(uint64_t cellMemBase, uint64_
         }
 
         auto opIdx = TaskID(static_cast<uint32_t>(opId));
+        // Claim before HandleOne so duplicates skip GetOperationStitch.
+        if (CheckStitchCacheDuplicate(stitchCache, stitchCacheStride, stitchCacheEpoch, funcIdx, opIdx,
+                                      static_cast<uint32_t>(devCurrIdx), operationIdx, stitchDevTaskId)) {
+            continue;
+        }
         (*matchCount)++;
-        DeviceStitchContext::HandleOneStitch(stitchingList[funcIdx], *currDup, funcIdx, opIdx, devCurrIdx, operationIdx,
-                                             workspace, DeviceStitchContext::StitchKind::StitchDefault, slotIdx,
-                                             stitchDevTaskId);
+        auto& producerStitchList = stitchingList[funcIdx].GetOperationStitch(opIdx, false);
+        DeviceStitchContext::HandleOneStitch(stitchingList[funcIdx], *currDup, producerStitchList, opIdx, devCurrIdx,
+                                             operationIdx, workspace, DeviceStitchContext::StitchKind::StitchDefault,
+                                             slotIdx);
 
         DEV_VERBOSE_DEBUG("Stitch dependency: (%u!%u) -> (%zu!%u), cellopType=%u, cellopCount=%u, "
                           "slotIdx=%d, opTagid=%x, curOpTagid=%lx",
