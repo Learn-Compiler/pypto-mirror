@@ -167,7 +167,9 @@ def test_shared_library_and_caller_use_the_same_resolved_target(monkeypatch, tmp
     assert "probe<<<blockDim, 16384, stream>>>" in caller
 
 
-def test_compilation_preserves_target_for_cached_launch_and_debug(monkeypatch, tmp_path):
+@pytest.mark.parametrize("debug_options", [{}, {"debug.enable_exception_dump": False},
+                                         {"debug.enable_exception_dump": True}])
+def test_compilation_preserves_target_for_cached_launch_and_debug(monkeypatch, tmp_path, debug_options):
     """The compiled object must retain the exact descriptor selected when its binary was built."""
     config = get_jit_compile_config()
     resolve = MagicMock(wraps=config.resolve_kernel_target)
@@ -183,12 +185,19 @@ def test_compilation_preserves_target_for_cached_launch_and_debug(monkeypatch, t
     monkeypatch.setattr(jit, "_codegen", lambda *_args, **_kwargs: cg)
     build = MagicMock(return_value="/tmp/test-kernel.so")
     monkeypatch.setattr(jit, "_build_jit_so", build)
+    from pypto import pypto_impl
+
+    scope = MagicMock()
+    scope.GetAllConfig.return_value = debug_options
+    monkeypatch.setattr(pypto_impl, "CurrentScope", lambda: scope)
     kernel = jit._TileJitKernel(lambda: None, arch=NpuArch.DAV_3510, compile_timeout=30)
     monkeypatch.setattr(kernel, "to_kernel_def", lambda *_args, **_kwargs: None)
     compiled = kernel._compile_variant(None, (None, None, None, None), None, ())
     resolve.assert_called_once_with(NpuArch.DAV_3510, has_cube=True, has_vector=True)
     assert compiled.target is build.call_args.kwargs["target"]
     assert compiled.target is config.kernel_targets[NpuArch.DAV_3510]["cube_vec"]
+    assert compiled.enable_exception_dump is debug_options.get("debug.enable_exception_dump", False)
+    scope.GetAllConfig.assert_called_once_with()
 
 
 def test_debug_command_reuses_compiled_target_without_resolving(monkeypatch, tmp_path):

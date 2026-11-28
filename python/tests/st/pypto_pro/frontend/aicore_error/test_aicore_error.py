@@ -145,7 +145,10 @@ _OOB_LOAD_TRIGGER = """\
 from __future__ import annotations
 import os, sys, logging
 import torch
+import pypto
 import pypto_pro.language as pl
+
+pypto.set_debug_options(enable_exception_dump=True)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -237,7 +240,10 @@ from __future__ import annotations
 import os, sys, logging
 from dataclasses import dataclass
 import torch
+import pypto
 import pypto_pro.language as pl
+
+pypto.set_debug_options(enable_exception_dump=True)
 from pypto_pro.runtime.tilingkey import TilingKeyField
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -373,7 +379,10 @@ _CUBE_OOB_TRIGGER = """\
 from __future__ import annotations
 import os, sys, logging
 import torch
+import pypto
 import pypto_pro.language as pl
+
+pypto.set_debug_options(enable_exception_dump=True)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -458,7 +467,10 @@ _PTR_SCALAR_OOB_TRIGGER = """\
 from __future__ import annotations
 import os, sys, logging
 import torch
+import pypto
 import pypto_pro.language as pl
+
+pypto.set_debug_options(enable_exception_dump=True)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 

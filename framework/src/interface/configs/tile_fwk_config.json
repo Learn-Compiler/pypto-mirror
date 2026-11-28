@@ -59,7 +59,8 @@
     "debug": {
         "compile_debug_mode": 0,
         "runtime_debug_mode": 0,
-        "dump_pass_graph": []
+        "dump_pass_graph": [],
+        "enable_exception_dump": false
     },
     "operation": {
         "combine_axis" : true

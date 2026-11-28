@@ -554,6 +554,7 @@ def set_debug_options(
     compile_debug_mode: Optional[int] = None,
     runtime_debug_mode: Optional[int] = None,
     dump_pass_graph: Optional[List[str]] = None,
+    enable_exception_dump: Optional[bool] = None,
 ) -> None:
     """
     Set debug options.
@@ -584,6 +585,11 @@ def set_debug_options(
         Pass identifiers to dump computation graph and print IR. Empty list disables it.
         Unmatched identifiers are ignored with a warning. If compile_debug_mode is 1,
         all passes dump graph and print IR regardless of dump_pass_graph.
+
+    enable_exception_dump : bool
+        Enable PyPTO Pro JIT exception-dump metadata collection. Disabled by default.
+        Set before the first compilation of a Kernel variant; cached variants retain
+        the setting captured when they were compiled.
     """
     options_dict = {k: v for k, v in locals().items() if v is not None}
     set_options(debug_options=options_dict)

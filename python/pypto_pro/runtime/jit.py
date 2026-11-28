@@ -171,6 +171,7 @@ class CompiledKernel:
     has_vector: bool = True
     target: KernelTarget | None = None
     needs_print_debug: bool = False
+    enable_exception_dump: bool = False
     # Lazily bound launch closure (see _build_launch_entry). It depends only on the
     # fields above, so it is built once instead of on every launch.
     entry: "Callable | None" = dataclasses.field(default=None, compare=False, repr=False)
@@ -776,12 +777,11 @@ def _build_launch_entry(compiled: "CompiledKernel"):
     # resource-query errors. int64_t preserves the error tag above its 32-bit detail.
     call_kernel.restype = ctypes.c_int64
     logger = logging.getLogger()
-    # Exception-dump bookkeeping. The addresses and shapes it caches are per-launch, so
-    # the call itself has to stay on the hot path -- but the import and the kernel's own
-    # identity do not, and _load_lib used to redo both on every launch.
-    from pypto_pro.runtime.exception_dump import set_dump_info as _set_dump_info
+    _set_dump_info = None
+    if compiled.enable_exception_dump:
+        from pypto_pro.runtime.exception_dump import set_dump_info as _set_dump_info
 
-    def entry(args: tuple, block_dim: int, stream):
+    def entry(args: tuple, block_dim: int, stream, tensor_shapes: list | None = None):
         if has_tiling:
             args = _pack_tiling_arg(args)
         if len(args) != n_params:
@@ -812,10 +812,12 @@ def _build_launch_entry(compiled: "CompiledKernel"):
                     raise InvalidType(
                         f"arg[{index}] '{name}': dtype mismatch — expected {expected_dtype}, got {arg.dtype}"
                     )
-                # One .shape per tensor: reused for the positivity check, the rank check,
-                # the constant-dimension checks and this parameter's slice of the dynamic
-                # ABI tail.
-                shape = arg.shape
+                # Reuse shapes read for variant selection during this same launch.
+                # Keep packed storage shapes here; normalize only the local value below.
+                shape = arg.shape if tensor_shapes is None else tensor_shapes[index]
+                if shape is None:
+                    shape = arg.shape
+                    tensor_shapes[index] = shape
                 if len(shape) != rank:
                     raise InvalidType(
                         f"arg[{index}] '{name}': rank mismatch — expected {rank}D, got {len(shape)}D"
@@ -852,7 +854,8 @@ def _build_launch_entry(compiled: "CompiledKernel"):
                 if other is None:
                     continue
                 # pack_mult is 1 unless this is a sub-byte parameter's packed axis.
-                actual = other.shape[dim] * pack_mult
+                shape = other.shape if tensor_shapes is None else tensor_shapes[param_index]
+                actual = shape[dim] * pack_mult
                 if first < 0:
                     first = actual
                 elif actual != first:
@@ -869,7 +872,8 @@ def _build_launch_entry(compiled: "CompiledKernel"):
         # native auto sentinel) and is rejected by the native limit check instead.
         if block_dim > 0xFFFFFFFF:
             block_dim = 0xFFFFFFFF
-        _set_dump_info(compiled, args, block_dim)
+        if _set_dump_info is not None:
+            _set_dump_info(compiled, args, block_dim)
         # Resolve limits and launch in one C call, avoiding two torch_npu C-extension
         # calls and Python dict/loop work. Errors return before any device launch.
         actual_block_dim = call_kernel(block_dim, stream._as_parameter_, *abi_args)
@@ -1768,7 +1772,7 @@ def _launch_error_message(error_code: int, requested_block_dim: int, compiled: "
     return f"{prefix} (kind={kind}, detail={detail:#x})"
 
 
-def _launch(compiled: "CompiledKernel", args: tuple, block_dim: int, stream):
+def _launch(compiled: "CompiledKernel", args: tuple, block_dim: int, stream, tensor_shapes: list | None = None):
     """Launch one compiled kernel, binding its entry closure on first use.
 
     Kept as a module-level function rather than inlined into the launcher so test
@@ -1779,7 +1783,7 @@ def _launch(compiled: "CompiledKernel", args: tuple, block_dim: int, stream):
     entry = compiled.entry
     if entry is None:
         entry = compiled.entry = _build_launch_entry(compiled)
-    entry(args, block_dim, stream)
+    entry(args, block_dim, stream, tensor_shapes)
 
 
 def _format_findings(findings) -> str:
@@ -1904,7 +1908,7 @@ def _build_sanitizer_entry(compiled: "CompiledKernel", build_dir: str):
     """
     base_entry = _build_launch_entry(compiled)
 
-    def entry(args: tuple, block_dim: int, stream):
+    def entry(args: tuple, block_dim: int, stream, tensor_shapes: list | None = None):
         # The sentinel cannot size the buffer (the actual count is resolved
         # natively at launch); size by the device-level upper bound instead,
         # while the launch itself still carries the sentinel.
@@ -1918,7 +1922,7 @@ def _build_sanitizer_entry(compiled: "CompiledKernel", build_dir: str):
         log_buffer.view(torch.int32)[::words_per_region] = 0
         capacity_u32 = words_per_region - 1
         full_args = (*args, log_buffer, capacity_u32)
-        base_entry(full_args, block_dim, stream)
+        base_entry(full_args, block_dim, stream, tensor_shapes)
         _replay_sanitizer(log_buffer, capacity_u32, sized_dim, build_dir, compiled.kernel_name, compiled.source_file)
 
     return entry
@@ -2218,10 +2222,11 @@ class _TileJitKernel:
             # A complete positional call is already normalized; skip the bind entirely.
             if kwargs or len(args) != arity:
                 args = self._normalize_launch_args(args, kwargs)
+            tensor_shapes = [None] * len(args) if self._static_dim_slots() else None
             compiled = self._ensure_compiled(
-                args, concrete_key=tk_snapshot, dtype_key=dtype_snapshot, spec=spec
+                args, concrete_key=tk_snapshot, dtype_key=dtype_snapshot, spec=spec, tensor_shapes=tensor_shapes
             )
-            _launch(compiled, args, block_dim, stream)
+            _launch(compiled, args, block_dim, stream, tensor_shapes)
 
         return launcher
 
@@ -2235,8 +2240,9 @@ class _TileJitKernel:
         self._validate_launch_arch()
         if kwargs_ or len(args) != self._positional_arity:
             args = self._normalize_launch_args(args, kwargs_)
-        compiled = self._ensure_compiled(args, spec=_NO_SPEC)
-        _launch(compiled, args, _AUTO_BLOCK_DIM, None)
+        tensor_shapes = [None] * len(args) if self._static_dim_slots() else None
+        compiled = self._ensure_compiled(args, spec=_NO_SPEC, tensor_shapes=tensor_shapes)
+        _launch(compiled, args, _AUTO_BLOCK_DIM, None, tensor_shapes)
 
     def _validate_launch_arch(self) -> None:
         from pypto_pro.runtime.platform import get_platform_info
@@ -2298,9 +2304,9 @@ class _TileJitKernel:
     def _bind_runtime_args(self, args: tuple):
         """Validate tensor arguments and derive the static specialization signature."""
         bound_signature = self._shape_signature_spec.bind_runtime_args(args)
-        python_args = self._shape_signature_spec.python_signature.bind(*args)
+        # Launch arguments are already in signature order, including defaults.
         for tensor_spec in self._shape_signature_spec.tensors:
-            arg = python_args.arguments[tensor_spec.parameter_name]
+            arg = args[tensor_spec.parameter_index]
             if arg is None:
                 continue
             if not isinstance(arg, torch.Tensor):
@@ -2320,16 +2326,61 @@ class _TileJitKernel:
         return self._shape_signature_spec.bind_static_shapes(static_shapes)
 
     def _static_dim_slots(self):
-        """Parameters carrying a StaticDim/StaticTail, i.e. the only ones whose runtime
-        shape can contribute to ``static_signature``. Computed once; empty for a kernel
-        declared entirely with ``pl.DYNAMIC`` and fixed dims, which lets _ensure_compiled
-        skip binding the signature altogether."""
+        """Cache (parameter index, minimum rank, STATIC axes, tail start) descriptors.
+
+        Only STATIC/ellipsis dimensions contribute to the compiled-cache key. Fixed
+        and dynamic dimensions are still checked by the launch entry on cache hits.
+        """
         slots = self._static_dim_slots_cache
         if slots is None:
-            slots = self._static_dim_slots_cache = tuple(
-                t.parameter_index for t in self._shape_signature_spec.tensors if t.requires_binding
-            )
+            from pypto_pro.runtime.shape_policy import StaticDim
+
+            slots = []
+            for tensor in self._shape_signature_spec.tensors:
+                if not tensor.requires_binding:
+                    continue
+                rank = len(tensor.dimensions) - int(tensor.has_ellipsis)
+                axes = tuple(axis for axis, dim in enumerate(tensor.dimensions) if isinstance(dim, StaticDim))
+                slots.append((tensor.parameter_index, rank, axes, rank if tensor.has_ellipsis else None))
+            slots = self._static_dim_slots_cache = tuple(slots)
         return slots
+
+    def _runtime_static_signature(self, args: tuple, tensor_shapes: list | None = None):
+        """Extract a cache key without binding; None requests the original error path.
+
+        The caller has normalized positional arguments. Unusual signatures, missing
+        tensors, invalid ranks and non-integer static extents fall back to full binding.
+        Positivity is checked by full binding on misses and entry on hits.
+        tensor_shapes, when provided, carries storage shapes to entry for this call
+        only. No tensor addresses or shapes are retained across launches.
+        """
+        slots = self._static_dim_slots()
+        if not slots:
+            return ()
+        if len(args) != self._positional_arity:
+            return None
+        signature = []
+        for index, rank, axes, tail in slots:
+            arg = args[index]
+            if not isinstance(arg, torch.Tensor):
+                return None
+            shape = arg.shape
+            if tensor_shapes is not None:
+                tensor_shapes[index] = shape
+            if (tail is None and len(shape) != rank) or (tail is not None and len(shape) < rank):
+                return None
+            for axis in axes:
+                value = shape[axis]
+                if type(value) is not int:
+                    return None
+                signature.append((index, axis, value))
+            if tail is not None:
+                for axis in range(tail, len(shape)):
+                    value = shape[axis]
+                    if type(value) is not int:
+                        return None
+                    signature.append((index, axis, value))
+        return tuple(signature)
 
     def _resolve_spec_identity(self, concrete_key, dtype_key):
         """Pack the specialization half of the cache key.
@@ -2346,7 +2397,7 @@ class _TileJitKernel:
 
     def _ensure_compiled(
         self, args: tuple, concrete_key: dict | None = None, dtype_key: dict | None = None,
-        spec: tuple | None = None,
+        spec: tuple | None = None, tensor_shapes: list | None = None,
     ):
         """Return the compiled variant for one launch, compiling it on first use.
 
@@ -2362,15 +2413,11 @@ class _TileJitKernel:
             spec = self._resolve_spec_identity(concrete_key, dtype_key)
         tilingkey_packed, _, _, dtype_hash = spec
 
-        # A cache hit needs only the key, so binding the full signature -- two
-        # inspect.Signature.bind calls plus a BoundDimension per declared dimension -- is
-        # deferred to the miss path, where codegen actually consumes it.
-        if not self._static_dim_slots():
-            # No parameter carries a StaticDim/StaticTail, so no dimension can ever be
-            # marked static and the signature is provably empty for every launch.
-            bound_signature = None
-            static_signature = ()
-        else:
+        # Hits need only STATIC values, not Signature.bind or BoundDimension objects.
+        # Full binding remains authoritative on misses and for malformed key inputs.
+        bound_signature = None
+        static_signature = self._runtime_static_signature(args, tensor_shapes)
+        if static_signature is None:
             bound_signature = self._bind_runtime_args(args)
             static_signature = bound_signature.static_signature
 
@@ -2383,6 +2430,7 @@ class _TileJitKernel:
 
         if bound_signature is None:
             bound_signature = self._bind_runtime_args(args)
+            static_signature = bound_signature.static_signature
         return self._compile_variant(concrete_key, spec, bound_signature, static_signature)
 
     def _compile_for_key(self, concrete_key: dict | None = None, dtype_key: dict | None = None):
@@ -2436,10 +2484,12 @@ class _TileJitKernel:
         target = get_jit_compile_config().resolve_kernel_target(
             arch, has_cube=cg.has_cube, has_vector=cg.has_vector,
         )
+        from pypto import pypto_impl
+
+        config = pypto_impl.CurrentScope().GetAllConfig()
         compile_timeout = self._compile_timeout
         if compile_timeout is None:
-            from pypto import pypto_impl
-            compile_timeout = pypto_impl.CurrentScope().GetAllConfig().get("host.compile_timeout", 600)
+            compile_timeout = config.get("host.compile_timeout", 600)
         lib_path = _build_jit_so(
             cg,
             arch,
@@ -2459,6 +2509,7 @@ class _TileJitKernel:
             has_cube=cg.has_cube, has_vector=cg.has_vector,
             target=target, source_file=cg.source_file,
             needs_print_debug=cg.needs_print_debug,
+            enable_exception_dump=config.get("debug.enable_exception_dump", False),
         )
         if self._sanitizer:
             # Pre-bind the sanitizer wrapper as the launch entry: it allocates

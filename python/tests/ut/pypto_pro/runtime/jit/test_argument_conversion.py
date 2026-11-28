@@ -602,7 +602,8 @@ def test_packed_dyn_dim_mismatch_with_unpacked_param(launch):
         launch(specs, args)
 
 
-def test_cached_launch_passes_actual_stream_without_python_query(monkeypatch):
+@pytest.mark.parametrize("enable_exception_dump", [False, True])
+def test_cached_launch_passes_actual_stream_without_python_query(monkeypatch, enable_exception_dump):
     """Binding and cached launches must use the native topology without consulting Python compile configuration."""
     lib = _FakeLib()
     monkeypatch.setattr(_jit, "ctypes", _CtypesProxy(lib))
@@ -611,7 +612,9 @@ def test_cached_launch_passes_actual_stream_without_python_query(monkeypatch):
     streams = [MagicMock(), MagicMock(), _FAKE_STREAM]
     _torch_mock.npu.current_stream.side_effect = streams[:2]
     target = _jit.KernelTarget("test-compiled-target", 1, 1, True)
-    compiled = CompiledKernel(lib_path="<fake>", param_specs=[], target=target)
+    compiled = CompiledKernel(
+        lib_path="<fake>", param_specs=[], target=target, enable_exception_dump=enable_exception_dump,
+    )
     dump = importlib.import_module("pypto_pro.runtime.exception_dump")
     set_dump_info = MagicMock()
     monkeypatch.setattr(dump, "set_dump_info", set_dump_info)
@@ -625,7 +628,7 @@ def test_cached_launch_passes_actual_stream_without_python_query(monkeypatch):
         assert [call[1] for call in lib.call_kernel.calls] == [s._as_parameter_ for s in streams]
         _torch_mock.npu.get_stream_limit.assert_not_called()
         config_lookup.assert_not_called()
-        assert len(set_dump_info.call_args_list) == 3
+        assert len(set_dump_info.call_args_list) == (3 if enable_exception_dump else 0)
         assert all(call.args[0] is compiled for call in set_dump_info.call_args_list)
     finally:
         _torch_mock.npu.current_stream.side_effect = None
@@ -713,7 +716,10 @@ def test_explicit_stream_validated_once_at_launcher_creation(monkeypatch):
     monkeypatch.setattr(kernel, "_validate_launch_arch", lambda: None)
     monkeypatch.setattr(kernel, "_ensure_compiled", lambda *_args, **_kwargs: None)
     launches = []
-    monkeypatch.setattr(_jit, "_launch", lambda _compiled, _args, blocks, target: launches.append((blocks, target)))
+    monkeypatch.setattr(
+        _jit, "_launch",
+        lambda _compiled, _args, blocks, target, _tensor_shapes=None: launches.append((blocks, target)),
+    )
     # Invalidating the type only after construction detects an accidental hot-path
     # isinstance check without requiring an NPU to create the test's stream.
     monkeypatch.setattr(_torch_mock.npu, "Stream", None)

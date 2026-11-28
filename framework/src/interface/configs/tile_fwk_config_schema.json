@@ -573,6 +573,13 @@
                     "minimum": 0,
                     "maximum": 4
                 },
+                "enable_exception_dump": {
+                    "type": "boolean",
+                    "label": {
+                        "zh": "是否启用PyPTO Pro JIT异常转储信息采集，默认关闭；须在Kernel变体首次编译前设置。",
+                        "en": "Enable PyPTO Pro JIT exception-dump metadata collection, disabled by default; set before a Kernel variant is first compiled."
+                    }
+                },
                 "dump_pass_graph": {
                     "type": "array",
                     "items": {

@@ -75,6 +75,11 @@ def assert_option_type_error(setter, pattern):
             "Option 'debug.runtime_debug_mode' has invalid type. Expected int64, but got string",
         ),
         (
+            lambda:pypto.set_debug_options(enable_exception_dump="true"),
+            "CHECK FAILED: ErrCode: F00001! Enum: ExternalError::INVALID_TYPE\n"
+            "Option 'debug.enable_exception_dump' has invalid type. Expected bool, but got string",
+        ),
+        (
             lambda:pypto.set_debug_options(dump_pass_graph=1),
             "CHECK FAILED: ErrCode: F00001! Enum: ExternalError::INVALID_TYPE\n"
             "Option 'debug.dump_pass_graph' has invalid type. Expected list\\[string\\], but got int64",
