@@ -229,28 +229,6 @@ inline bool SetCmpCtx(FeatureContext& ctx, const RuleInput& input)
     return true;
 }
 
-inline bool SetConcatCtx(FeatureContext& ctx, const RuleInput& input)
-{
-    if (input.tileOp == nullptr || *input.tileOp == nullptr || input.inShapes == nullptr || input.inShapes->empty()) {
-        return false;
-    }
-    if (!SetCommonCtx(ctx, input)) {
-        return false;
-    }
-    const auto& inShapes = *input.inShapes;
-    const auto& outShape = (input.outShapes != nullptr && !input.outShapes->empty()) ? input.outShapes->back() :
-                                                                                       inShapes.back();
-    ctx.Set("COLS0", (!inShapes[0].empty() && inShapes[0].back() > 0) ? static_cast<double>(inShapes[0].back()) : 0.0);
-    const double cols1 = (inShapes.size() > 1 && !inShapes[1].empty()) ? static_cast<double>(inShapes[1].back()) : 0.0;
-    ctx.Set("COLS1", cols1);
-    double outRows = 1.0;
-    for (size_t i = 0; i + 1 < outShape.size(); ++i) {
-        outRows *= outShape[i] > 0 ? outShape[i] : 1;
-    }
-    ctx.Set("OUT_ROWS", outRows);
-    return true;
-}
-
 inline bool SetIndexPutCtx(FeatureContext& ctx, const RuleInput& input)
 {
     if (input.tileOp == nullptr || *input.tileOp == nullptr) {
@@ -675,24 +653,9 @@ inline const std::unordered_map<std::string, CostRule>& TileOpRules()
           {},
           &SetPairCtx}},
         // 64B repeat rules.
-        {"NEG",
-         {"("
-          "floor(x1 * R64 + x2 + 0.5)"
-          ")",
-          {1.125f, 12.0f},
-          &SetCommonCtx}},
-        {"RECIPROCAL",
-         {"("
-          "floor(x1 * R64 + x2 + 0.5)"
-          ")",
-          {1.0f, 12.0f},
-          &SetCommonCtx}},
-        {"RSQRT",
-         {"("
-          "floor(x1 * R64 + x2 + 0.5)"
-          ")",
-          {5.6375f, 12.0f},
-          &SetCommonCtx}},
+        // RECIPROCAL is intentionally omitted: the frontend still emits OP_RECIPROCAL,
+        // but there is no 9050 UT/board data yet; it falls back to the legacy model
+        // until calibrated.
         {"VEC_DUP",
          {"("
           "floor(select(2 - DTYPE_BYTES, "
@@ -889,13 +852,6 @@ inline const std::unordered_map<std::string, CostRule>& TileOpRules()
           ")",
           {},
           &SetCommonCtx}},
-        // CONCAT: copy + scatter per row.
-        {"CONCAT",
-         {"("
-          "floor(x1 + x2 * OUT_ROWS * (x3 * ceil(COLS0 / EPR64) + x4 * ceil(COLS1 / EPR64)) + 0.5)"
-          ")",
-          {12.0f, 1.0f, 1.5f, 3.5f},
-          &SetConcatCtx}},
         {"CAST",
          {"("
           "floor(switch(CAST_TYPE, {"
@@ -942,6 +898,24 @@ inline const std::unordered_map<std::string, CostRule>& TileOpRules()
           ")",
           {18.0f, 92.37f, 26214.0f, 12.793270845f},
           &SetCommonCtx}},
+        // RESHAPE_COPY_IN/OUT: UB<->GM TReshapeLoad/TReshapeStore use the same MTE ND path
+        // as COPY_IN/OUT; coefficients fitted from the 64+64 9050 board cases.
+        // NOTE: L1_RESHAPE_COPY_IN (ND2NZ) and L0C_RESHAPE_COPY_OUT (NZ2ND) have no rule yet
+        // and keep falling back to the legacy cost model until board data is available.
+        {"RESHAPE_COPY_IN",
+         {"("
+          "floor(x1 + BYTES / x2 + 0.5)"
+          ")",
+          {12.0f, 13.30f},
+          &SetCommonCtx}},
+        {"RESHAPE_COPY_OUT",
+         {"("
+          "floor(select(BYTES - x3, x1 + x3 / x2 + (BYTES - x3) / x4, x1 + BYTES / x2) + 0.5)"
+          ")",
+          {18.0f, 107.386f, 26214.0f, 12.8289f},
+          &SetCommonCtx}},
+        // TRANSPOSE_MOVEIN/TRANSPOSE_MOVEOUT: real IR producers, but no dedicated 9050
+        // UT/board cases for fitting/calibration yet. 后续需要补充用例并校准验证。
         {"TRANSPOSE_MOVEIN",
          {"("
           "floor(1.0750 * ROWS * ceil(COLS * DTYPE_BYTES / 64) + x2 + 0.5)"
