@@ -9,7 +9,7 @@ AI CPU Kernel通过`@pypto_pro.language.jit(mode="aicpu_kernel")`声明，在函
 | Tensor参数 | 支持。使用pypto_pro.language.Tensor声明，维度支持pypto_pro.language.DYNAMIC；输入/输出标注（pypto_pro.language.Input、pypto_pro.language.Output）与AI Core Kernel一致。 |
 | Scalar参数 | 支持。以数据类型标注声明（如pypto_pro.language.DT_INT32、pypto_pro.language.DT_INT64），运行时按值传入。 |
 | Ptr参数 | 支持。离线方式下与Tensor参数一样按数据指针传入，运行时传None时按空指针处理。 |
-| TILING、WINDOW参数 | 不支持。JIT fast-launch与离线方式均在参数校验阶段拒绝。 |
+| TILING参数 | 不支持。JIT fast-launch与离线方式均在参数校验阶段拒绝。 |
 | TilingData、TilingKey、datatype特化 | 不支持。装饰器拒绝tiling_key与datatype选项。 |
 
 Tensor的声明语法与函数体内的读写操作参见[Tensor创建和操作](tensor_creation_and_operations.md)。

@@ -174,7 +174,7 @@ AI CPU Kernel采用独立的离线编译流程，编译过程会先通过codegen
 
 约束：
 
-- 离线交付的AI CPU Kernel参数仅支持Tensor与指针类（运行时None按空指针处理）；不支持TILING、WINDOW等参数。
+- 离线交付的AI CPU Kernel参数仅支持Tensor与指针类（运行时None按空指针处理）；不支持TILING等参数。
 - AI CPU Kernel不参与SuperKernel融合。
 
 ## 配置CMakeLists.txt

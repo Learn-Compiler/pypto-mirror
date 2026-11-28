@@ -20,7 +20,7 @@ AI CPU Kernel不支持AI Core侧的调试机制：装饰器选项sanitizer会被
 - 装饰器选项：仅支持arch、name、compile_timeout、max_threads；不支持pipeline、tiling_key、datatype、sanitizer、sk_cap、schedmode等选项配置；
 - auto_mutex：强制关闭，AI CPU Kernel单任务串行执行，没有设备侧mutex加锁机制；
 - 支持的Tensor操作：仅支持[pypto_pro.language.numel](../../../../../api/pro_api/AICPU-API/numel.md)、pypto_pro.language.getval、pypto_pro.language.setval与`is None`/`is not None`判断；Tensor对象方法调用（如`t.size()`）、Tile接口、VF/SIMT函数与同步类系统接口均不支持；
-- 参数种类：TILING、WINDOW参数在参数校验阶段拒绝。
+- 参数种类：TILING参数在参数校验阶段拒绝。
 
 接口范围与能力边界参见[AI CPU编程概述](../../programming_paradigm/AICPU/programming_paradigm.md)。
 
